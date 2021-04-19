@@ -17,22 +17,12 @@
     }
   }
 
-  .Select {
-    .kube-context {
-      --flex-gap: #{$padding};
-    }
+  .content {
+    overflow-y: scroll;
+  }
 
-    // todo: extract to component, merge with namespace-select.scss
-    &__placeholder {
-      width: 100%;
-      white-space: nowrap;
-      text-overflow: ellipsis;
-      overflow: hidden;
-    }
-
-    &__control {
-      box-shadow: 0 0 0 1px $borderFaintColor;
-    }
+  .MuiTabs-indicator {
+    background-color: var(--primary);
   }
 
   code {

@@ -1,8 +1,8 @@
 import "./add-cluster.scss";
 import os from "os";
 import React from "react";
-import { observer } from "mobx-react";
-import { action, computed, observable, runInAction } from "mobx";
+import { disposeOnUnmount, observer } from "mobx-react";
+import { action, computed, observable, reaction, runInAction } from "mobx";
 import { remote } from "electron";
 import { KubeConfig } from "@kubernetes/client-node";
 import { DropFileInput, Input } from "../input";
@@ -15,13 +15,14 @@ import { v4 as uuid } from "uuid";
 import { navigate } from "../../navigation";
 import { UserStore } from "../../../common/user-store";
 import { Notifications } from "../notifications";
-import { Tab, Tabs } from "../tabs";
 import { appEventBus } from "../../../common/event-bus";
 import { PageLayout } from "../layout/page-layout";
 import { docsUrl } from "../../../common/vars";
 import { catalogURL } from "../+catalog";
-import { List, ListItem, ListItemSecondaryAction, ListItemText, Switch, IconButton } from "@material-ui/core";
+import { List, ListItem, ListItemSecondaryAction, ListItemText, Switch, IconButton, Tabs, Tab } from "@material-ui/core";
 import { KeyboardArrowDown, KeyboardArrowUp } from "@material-ui/icons";
+import { EditableList } from "../editable-list";
+import { TabContext, TabPanel } from "@material-ui/lab";
 
 enum KubeConfigSourceTab {
   FILE = "file",
@@ -52,18 +53,27 @@ export class AddCluster extends React.Component {
 
   // available contexts from kubeconfig-file or user-input
   @observable kubeContexts = observable.map<string, Option>();
-  @observable sourceTab = KubeConfigSourceTab.FILE;
+  @observable activeTab = KubeConfigSourceTab.FILE;
   @observable kubeConfigPath = "";
   @observable kubeConfigError = "";
   @observable customConfig = "";
   @observable proxyServer = "";
   @observable isWaiting = false;
   @observable showProxySettings = false;
+  @observable showAccessibleNamespaces = false;
+  accessibleNamespaces = observable.set<string>();
 
   componentDidMount() {
     ClusterStore.getInstance().setActive(null);
     this.setKubeConfig(UserStore.getInstance().kubeConfigPath);
     appEventBus.emit({ name: "cluster-add", action: "start" });
+
+    disposeOnUnmount(this, [
+      reaction(() => this.activeTab, () => {
+        this.error = "";
+        this.refreshContexts();
+      }),
+    ]);
   }
 
   componentWillUnmount() {
@@ -78,6 +88,10 @@ export class AddCluster extends React.Component {
 
   @computed get anySelected(): boolean {
     return this.selectedContexts.length > 0;
+  }
+
+  @computed get accessibleNamespacesList(): string[] {
+    return Array.from(this.accessibleNamespaces);
   }
 
   @action
@@ -97,7 +111,7 @@ export class AddCluster extends React.Component {
   refreshContexts() {
     this.error = "";
 
-    switch (this.sourceTab) {
+    switch (this.activeTab) {
       case KubeConfigSourceTab.FILE:
         this.kubeContexts.replace(getContexts(this.fileBasedConfig));
         break;
@@ -132,7 +146,7 @@ export class AddCluster extends React.Component {
   };
 
   onDropKubeConfig = (files: File[]) => {
-    this.sourceTab = KubeConfigSourceTab.FILE;
+    this.activeTab = KubeConfigSourceTab.FILE;
     this.setKubeConfig(files[0].path);
   };
 
@@ -149,9 +163,12 @@ export class AddCluster extends React.Component {
       const newClusters = this.selectedContexts
         .map(config => {
           const clusterId = uuid();
-          const kubeConfigPath = this.sourceTab === KubeConfigSourceTab.FILE
+          const kubeConfigPath = this.activeTab === KubeConfigSourceTab.FILE
             ? this.kubeConfigPath // save link to original kubeconfig in file-system
             : ClusterStore.embedCustomKubeConfig(clusterId, config); // save in app-files folder
+          const accessibleNamespaces = this.accessibleNamespacesList.length > 1
+            ? this.accessibleNamespacesList
+            : undefined;
 
           return {
             id: clusterId,
@@ -159,6 +176,7 @@ export class AddCluster extends React.Component {
             contextName: config.currentContext,
             preferences: {
               httpsProxy: this.proxyServer || undefined,
+              accessibleNamespaces,
             },
           };
         });
@@ -172,7 +190,10 @@ export class AddCluster extends React.Component {
 
         navigate(catalogURL());
       });
+
       this.refreshContexts();
+      this.proxyServer = "";
+      this.accessibleNamespaces.clear();
     } catch (err) {
       this.error = String(err);
       Notifications.error(<>Error while adding cluster(s): {this.error}</>);
@@ -243,31 +264,34 @@ export class AddCluster extends React.Component {
     );
   }
 
-  renderTab() {
-    switch (this.sourceTab) {
-      case KubeConfigSourceTab.FILE:
-        return this.renderFileTab();
-      case KubeConfigSourceTab.TEXT:
-        return this.renderTextTab();
-    }
-  }
-
   renderKubeConfigSource() {
     return (
-      <>
-        <Tabs onChange={this.onKubeConfigTabChange}>
+      <TabContext value={this.activeTab}>
+        <Tabs
+          value={this.activeTab}
+          onChange={(event, newActiveTab) => this.activeTab = newActiveTab}
+          centered
+        >
           <Tab
+            style={{ fontSize: "inherit" }}
             value={KubeConfigSourceTab.FILE}
             label="Select kubeconfig file"
-            active={this.sourceTab == KubeConfigSourceTab.FILE}/>
+            color="inherit"
+          />
           <Tab
+            style={{ fontSize: "inherit" }}
             value={KubeConfigSourceTab.TEXT}
             label="Paste as text"
-            active={this.sourceTab == KubeConfigSourceTab.TEXT}
+            color="inherit"
           />
         </Tabs>
-        {this.renderTab()}
-      </>
+        <TabPanel value={KubeConfigSourceTab.FILE}>
+          {this.renderFileTab()}
+        </TabPanel>
+        <TabPanel value={KubeConfigSourceTab.TEXT}>
+          {this.renderTextTab()}
+        </TabPanel>
+      </TabContext>
     );
   }
 
@@ -311,6 +335,10 @@ export class AddCluster extends React.Component {
     this.showProxySettings = !this.showProxySettings;
   };
 
+  toggleShowAccessibleNamespaces = () => {
+    this.showAccessibleNamespaces = !this.showAccessibleNamespaces;
+  };
+
   onKubeConfigInputBlur = () => {
     const isChanged = this.kubeConfigPath !== UserStore.getInstance().kubeConfigPath;
 
@@ -321,11 +349,40 @@ export class AddCluster extends React.Component {
     }
   };
 
-  onKubeConfigTabChange = (tabId: KubeConfigSourceTab) => {
-    this.sourceTab = tabId;
-    this.error = "";
-    this.refreshContexts();
-  };
+  renderAccessibleNamespaces() {
+    return (
+      <>
+        <h3>
+          Accessible Namespaces
+          <IconButton
+            onClick={this.toggleShowAccessibleNamespaces}
+            style={{ fontSize: "inherit" }}
+            color="inherit"
+          >
+            {
+              this.showAccessibleNamespaces
+                ? <KeyboardArrowUp style={{ fontSize: "inherit" }} />
+                : <KeyboardArrowDown style={{ fontSize: "inherit" }} />
+            }
+          </IconButton>
+        </h3>
+        {this.showAccessibleNamespaces && (
+          <div>
+            <p>This setting is useful for manually specifying which namespaces you have access to. This is useful when you do not have permissions to list namespaces.</p>
+            <EditableList
+              placeholder="Add new namespace ..."
+              add={newNamespace => this.accessibleNamespaces.add(newNamespace)}
+              remove={({ oldItem }) => this.accessibleNamespaces.delete(oldItem)}
+              items={this.accessibleNamespacesList}
+            />
+            <small className="hint">
+              These settings will be applied too all clusters being added.
+            </small>
+          </div>
+        )}
+      </>
+    );
+  }
 
   renderProxySettings() {
     return (
@@ -395,6 +452,7 @@ export class AddCluster extends React.Component {
           {this.renderAddClustersButton()}
           {this.renderContextSelectionList()}
           {this.renderProxySettings()}
+          {this.renderAccessibleNamespaces()}
         </PageLayout>
       </DropFileInput>
     );
