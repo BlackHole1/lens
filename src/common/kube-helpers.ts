@@ -7,6 +7,7 @@ import logger from "../main/logger";
 import commandExists from "command-exists";
 import { ExecValidationNotFoundError } from "./custom-errors";
 import { newClusters, newContexts, newUsers } from "@kubernetes/client-node/dist/config_types";
+import { resolvePath } from "./utils";
 
 export type KubeConfigValidationOpts = {
   validateCluster?: boolean;
@@ -15,18 +16,6 @@ export type KubeConfigValidationOpts = {
 };
 
 export const kubeConfigDefaultPath = path.join(os.homedir(), ".kube", "config");
-
-function resolveTilde(filePath: string) {
-  if (filePath[0] === "~" && (filePath[1] === "/" || filePath.length === 1)) {
-    return filePath.replace("~", os.homedir());
-  }
-
-  return filePath;
-}
-
-function readResolvedPathSync(filePath: string): string {
-  return fse.readFileSync(path.resolve(resolveTilde(filePath)), "utf8");
-}
 
 function checkRawContext(rawContext: any): boolean {
   return rawContext.name && rawContext.context?.cluster && rawContext.context?.user;
@@ -47,8 +36,8 @@ function loadToOptions(rawYaml: string): any {
   return { clusters, users, contexts, currentContext };
 }
 
-export function loadConfig(pathOrContent?: string): KubeConfig {
-  const content = fse.pathExistsSync(pathOrContent) ? readResolvedPathSync(pathOrContent) : pathOrContent;
+export function loadConfigFromFileSync(filePath: string): KubeConfig {
+  const content = fse.readFileSync(resolvePath(filePath), "utf-8");
   const options = loadToOptions(content);
   const kc = new KubeConfig();
 
@@ -58,55 +47,67 @@ export function loadConfig(pathOrContent?: string): KubeConfig {
   return kc;
 }
 
-/**
- * KubeConfig is valid when there's at least one of each defined:
- * - User
- * - Cluster
- * - Context
- * @param config KubeConfig to check
- */
-export function validateConfig(config: KubeConfig | string): KubeConfig {
-  if (typeof config == "string") {
-    config = loadConfig(config);
-  }
-  logger.debug(`validating kube config: ${JSON.stringify(config)}`);
+export async function loadConfigFromFile(filePath: string): Promise<KubeConfig> {
+  const content = await fse.readFile(resolvePath(filePath), "utf-8");
+  const options = loadToOptions(content);
+  const kc = new KubeConfig();
 
-  if (!config.users || config.users.length == 0) {
-    throw new Error("No users provided in config");
+  // need to load using the kubernetes client to generate a kubeconfig object
+  kc.loadFromOptions(options);
+
+  return kc;
+}
+
+export function loadConfigFromString(content: string): KubeConfig {
+  const options = loadToOptions(content);
+  const kc = new KubeConfig();
+
+  // need to load using the kubernetes client to generate a kubeconfig object
+  kc.loadFromOptions(options);
+
+  return kc;
+}
+
+function errorsToError(errors: string[]): undefined | string {
+  if (errors.length === 0) {
+    return undefined;
   }
 
-  if (!config.clusters || config.clusters.length == 0) {
-    throw new Error("No clusters provided in config");
-  }
+  return errors.join("\n");
+}
 
-  if (!config.contexts || config.contexts.length == 0) {
-    throw new Error("No contexts provided in config");
-  }
-
-  return config;
+export interface SplitConfigEntry {
+  config: KubeConfig,
+  error?: string;
 }
 
 /**
  * Breaks kube config into several configs. Each context as it own KubeConfig object
  */
-export function splitConfig(kubeConfig: KubeConfig): KubeConfig[] {
-  const configs: KubeConfig[] = [];
+export function splitConfig(kubeConfig: KubeConfig): SplitConfigEntry[] {
+  const { contexts = [] } = kubeConfig;
 
-  if (!kubeConfig.contexts) {
-    return configs;
-  }
-  kubeConfig.contexts.forEach(ctx => {
-    const kc = new KubeConfig();
+  return contexts.map(context => {
+    const config = new KubeConfig();
+    const errors = [];
 
-    kc.clusters = [kubeConfig.getCluster(ctx.cluster)].filter(n => n);
-    kc.users = [kubeConfig.getUser(ctx.user)].filter(n => n);
-    kc.contexts = [kubeConfig.getContextObject(ctx.name)].filter(n => n);
-    kc.setCurrentContext(ctx.name);
+    config.clusters = [kubeConfig.getCluster(context.cluster)].filter(Boolean);
+    config.users = [kubeConfig.getUser(context.user)].filter(Boolean);
+    config.contexts = [kubeConfig.getContextObject(context.name)].filter(n => n);
 
-    configs.push(kc);
+    config.setCurrentContext(context.name);
+
+    try {
+      validateKubeConfig(config, context.name);
+    } catch (error) {
+      errors.push(String(error));
+    }
+
+    return {
+      config,
+      error: errorsToError(errors),
+    };
   });
-
-  return configs;
 }
 
 export function dumpConfigYaml(kubeConfig: Partial<KubeConfig>): string {

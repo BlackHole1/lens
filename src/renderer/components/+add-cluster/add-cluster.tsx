@@ -2,46 +2,63 @@ import "./add-cluster.scss";
 import os from "os";
 import React from "react";
 import { observer } from "mobx-react";
-import { action, observable, runInAction } from "mobx";
+import { action, computed, observable, runInAction } from "mobx";
 import { remote } from "electron";
 import { KubeConfig } from "@kubernetes/client-node";
-import { Select, SelectOption } from "../select";
 import { DropFileInput, Input } from "../input";
 import { AceEditor } from "../ace-editor";
 import { Button } from "../button";
 import { Icon } from "../icon";
-import { kubeConfigDefaultPath, loadConfig, splitConfig, validateConfig, validateKubeConfig } from "../../../common/kube-helpers";
-import { ClusterModel, ClusterStore } from "../../../common/cluster-store";
+import { kubeConfigDefaultPath, loadConfigFromFile, loadConfigFromString, splitConfig } from "../../../common/kube-helpers";
+import { ClusterStore } from "../../../common/cluster-store";
 import { v4 as uuid } from "uuid";
 import { navigate } from "../../navigation";
 import { UserStore } from "../../../common/user-store";
-import { cssNames } from "../../utils";
 import { Notifications } from "../notifications";
 import { Tab, Tabs } from "../tabs";
-import { ExecValidationNotFoundError } from "../../../common/custom-errors";
 import { appEventBus } from "../../../common/event-bus";
 import { PageLayout } from "../layout/page-layout";
 import { docsUrl } from "../../../common/vars";
 import { catalogURL } from "../+catalog";
+import { List, ListItem, ListItemSecondaryAction, ListItemText, Switch, IconButton } from "@material-ui/core";
+import { KeyboardArrowDown, KeyboardArrowUp } from "@material-ui/icons";
 
 enum KubeConfigSourceTab {
   FILE = "file",
   TEXT = "text"
 }
 
+interface Option {
+  config: KubeConfig;
+  selected: boolean;
+  error?: string;
+}
+
+function getContexts(config: KubeConfig): Map<string, Option> {
+  return new Map(
+    splitConfig(config)
+      .map(({ config, error }) => [config.currentContext, {
+        config,
+        error,
+        selected: false,
+      }])
+  );
+}
+
 @observer
 export class AddCluster extends React.Component {
-  @observable.ref kubeConfigLocal: KubeConfig;
+  @observable.ref fileBasedConfig: KubeConfig;
   @observable.ref error: React.ReactNode;
 
-  @observable kubeContexts = observable.map<string, KubeConfig>(); // available contexts from kubeconfig-file or user-input
-  @observable selectedContexts = observable.array<string>();
+  // available contexts from kubeconfig-file or user-input
+  @observable kubeContexts = observable.map<string, Option>();
   @observable sourceTab = KubeConfigSourceTab.FILE;
   @observable kubeConfigPath = "";
+  @observable kubeConfigError = "";
   @observable customConfig = "";
   @observable proxyServer = "";
   @observable isWaiting = false;
-  @observable showSettings = false;
+  @observable showProxySettings = false;
 
   componentDidMount() {
     ClusterStore.getInstance().setActive(null);
@@ -53,44 +70,40 @@ export class AddCluster extends React.Component {
     UserStore.getInstance().markNewContextsAsSeen();
   }
 
+  @computed get selectedContexts(): KubeConfig[] {
+    return Array.from(this.kubeContexts.values())
+      .filter(({ selected }) => selected)
+      .map(({ config }) => config);
+  }
+
+  @computed get anySelected(): boolean {
+    return this.selectedContexts.length > 1;
+  }
+
   @action
-  setKubeConfig(filePath: string, { throwError = false } = {}) {
+  async setKubeConfig(filePath: string) {
     try {
-      this.kubeConfigLocal = loadConfig(filePath);
-      validateConfig(this.kubeConfigLocal);
+      this.fileBasedConfig = await loadConfigFromFile(filePath);
+
       this.refreshContexts();
       this.kubeConfigPath = filePath;
       UserStore.getInstance().kubeConfigPath = filePath; // save to store
-    } catch (err) {
-      if (!UserStore.getInstance().isDefaultKubeConfigPath) {
-        Notifications.error(
-          <div>Can&apos;t setup <code>{filePath}</code> as kubeconfig: {String(err)}</div>
-        );
-      }
-
-      if (throwError) {
-        throw err;
-      }
+    } catch (error) {
+      this.kubeConfigError = String(error);
     }
   }
 
   @action
   refreshContexts() {
-    this.selectedContexts.clear();
-    this.kubeContexts.clear();
+    this.error = "";
 
     switch (this.sourceTab) {
       case KubeConfigSourceTab.FILE:
-        const contexts = this.getContexts(this.kubeConfigLocal);
-
-        this.kubeContexts.replace(contexts);
+        this.kubeContexts.replace(getContexts(this.fileBasedConfig));
         break;
       case KubeConfigSourceTab.TEXT:
         try {
-          this.error = "";
-          const contexts = this.getContexts(loadConfig(this.customConfig || "{}"));
-
-          this.kubeContexts.replace(contexts);
+          this.kubeContexts.replace(getContexts(loadConfigFromString(this.customConfig || "{}")));
         } catch (err) {
           this.error = String(err);
         }
@@ -98,18 +111,10 @@ export class AddCluster extends React.Component {
     }
 
     if (this.kubeContexts.size === 1) {
-      this.selectedContexts.push(this.kubeContexts.keys().next().value);
+      for (const option of this.kubeContexts.values()) {
+        option.selected = true;
+      }
     }
-  }
-
-  getContexts(config: KubeConfig): Map<string, KubeConfig> {
-    const contexts = new Map();
-
-    splitConfig(config).forEach(config => {
-      contexts.set(config.currentContext, config);
-    });
-
-    return contexts;
   }
 
   selectKubeConfigDialog = async () => {
@@ -133,52 +138,30 @@ export class AddCluster extends React.Component {
 
   @action
   addClusters = () => {
-    let newClusters: ClusterModel[] = [];
+    if (!this.selectedContexts.length) {
+      return this.error = "Please select at least one cluster context";
+    }
 
     try {
-      if (!this.selectedContexts.length) {
-        this.error = "Please select at least one cluster context";
-
-        return;
-      }
       this.error = "";
       this.isWaiting = true;
       appEventBus.emit({ name: "cluster-add", action: "click" });
-      newClusters = this.selectedContexts.filter(context => {
-        try {
-          const kubeConfig = this.kubeContexts.get(context);
+      const newClusters = this.selectedContexts
+        .map(config => {
+          const clusterId = uuid();
+          const kubeConfigPath = this.sourceTab === KubeConfigSourceTab.FILE
+            ? this.kubeConfigPath // save link to original kubeconfig in file-system
+            : ClusterStore.embedCustomKubeConfig(clusterId, config); // save in app-files folder
 
-          validateKubeConfig(kubeConfig, context);
-
-          return true;
-        } catch (err) {
-          this.error = String(err.message);
-
-          if (err instanceof ExecValidationNotFoundError) {
-            Notifications.error(<>Error while adding cluster(s): {this.error}</>);
-
-            return false;
-          } else {
-            throw new Error(err);
-          }
-        }
-      }).map(context => {
-        const clusterId = uuid();
-        const kubeConfig = this.kubeContexts.get(context);
-        const kubeConfigPath = this.sourceTab === KubeConfigSourceTab.FILE
-          ? this.kubeConfigPath // save link to original kubeconfig in file-system
-          : ClusterStore.embedCustomKubeConfig(clusterId, kubeConfig); // save in app-files folder
-
-        return {
-          id: clusterId,
-          kubeConfigPath,
-          contextName: kubeConfig.currentContext,
-          preferences: {
-            clusterName: kubeConfig.currentContext,
-            httpsProxy: this.proxyServer || undefined,
-          },
-        };
-      });
+          return {
+            id: clusterId,
+            kubeConfigPath,
+            contextName: config.currentContext,
+            preferences: {
+              httpsProxy: this.proxyServer || undefined,
+            },
+          };
+        });
 
       runInAction(() => {
         ClusterStore.getInstance().addClusters(...newClusters);
@@ -209,6 +192,66 @@ export class AddCluster extends React.Component {
     );
   }
 
+  renderFileTab() {
+    return (
+      <div>
+        <div className="kube-config-select flex gaps align-center">
+          <Input
+            theme="round-black"
+            className="kube-config-path box grow"
+            value={this.kubeConfigPath}
+            onChange={v => this.kubeConfigPath = v}
+            onBlur={this.onKubeConfigInputBlur}
+          />
+          {this.kubeConfigPath !== kubeConfigDefaultPath && (
+            <Icon
+              material="settings_backup_restore"
+              onClick={() => this.setKubeConfig(kubeConfigDefaultPath)}
+              tooltip="Reset"
+            />
+          )}
+          <Icon
+            material="folder"
+            onClick={this.selectKubeConfigDialog}
+            tooltip="Browse"
+          />
+        </div>
+        <small className="hint">
+          Pro-Tip: you can also drag-n-drop kubeconfig file to this area
+        </small>
+      </div>
+    );
+  }
+
+  renderTextTab() {
+    return (
+      <div className="flex column">
+        <AceEditor
+          autoFocus
+          showGutter={false}
+          mode="yaml"
+          value={this.customConfig}
+          onChange={value => {
+            this.customConfig = value;
+            this.refreshContexts();
+          }}
+        />
+        <small className="hint">
+          Pro-Tip: paste kubeconfig to get available contexts
+        </small>
+      </div>
+    );
+  }
+
+  renderTab() {
+    switch (this.sourceTab) {
+      case KubeConfigSourceTab.FILE:
+        return this.renderFileTab();
+      case KubeConfigSourceTab.TEXT:
+        return this.renderTextTab();
+    }
+  }
+
   renderKubeConfigSource() {
     return (
       <>
@@ -223,89 +266,50 @@ export class AddCluster extends React.Component {
             active={this.sourceTab == KubeConfigSourceTab.TEXT}
           />
         </Tabs>
-        {this.sourceTab === KubeConfigSourceTab.FILE && (
-          <div>
-            <div className="kube-config-select flex gaps align-center">
-              <Input
-                theme="round-black"
-                className="kube-config-path box grow"
-                value={this.kubeConfigPath}
-                onChange={v => this.kubeConfigPath = v}
-                onBlur={this.onKubeConfigInputBlur}
-              />
-              {this.kubeConfigPath !== kubeConfigDefaultPath && (
-                <Icon
-                  material="settings_backup_restore"
-                  onClick={() => this.setKubeConfig(kubeConfigDefaultPath)}
-                  tooltip="Reset"
-                />
-              )}
-              <Icon
-                material="folder"
-                onClick={this.selectKubeConfigDialog}
-                tooltip="Browse"
-              />
-            </div>
-            <small className="hint">
-              Pro-Tip: you can also drag-n-drop kubeconfig file to this area
-            </small>
-          </div>
-        )}
-        {this.sourceTab === KubeConfigSourceTab.TEXT && (
-          <div className="flex column">
-            <AceEditor
-              autoFocus
-              showGutter={false}
-              mode="yaml"
-              value={this.customConfig}
-              onChange={value => {
-                this.customConfig = value;
-                this.refreshContexts();
-              }}
-            />
-            <small className="hint">
-              Pro-Tip: paste kubeconfig to get available contexts
-            </small>
-          </div>
-        )}
+        {this.renderTab()}
       </>
     );
   }
 
-  renderContextSelector() {
-    const allContexts = Array.from(this.kubeContexts.keys());
-    const placeholder = this.selectedContexts.length > 0
-      ? <>Selected contexts: <b>{this.selectedContexts.length}</b></>
-      : "Select contexts";
+  renderContextSelectionEntry = (option: Option) => {
+    const context = option.config.currentContext;
+    const id = `context-selection-${context}`;
 
     return (
-      <div>
-        <Select
-          id="kubecontext-select" // todo: provide better mapping for integration tests (e.g. data-test-id="..")
-          placeholder={placeholder}
-          controlShouldRenderValue={false}
-          closeMenuOnSelect={false}
-          isOptionSelected={() => false}
-          options={allContexts}
-          formatOptionLabel={this.formatContextLabel}
-          noOptionsMessage={() => `No contexts available or they have been added already`}
-          onChange={({ value: ctx }: SelectOption<string>) => {
-            if (this.selectedContexts.includes(ctx)) {
-              this.selectedContexts.remove(ctx);
-            } else {
-              this.selectedContexts.push(ctx);
-            }
-          }}
+      <ListItem key={context} disabled={Boolean(option.error)} style={{ fontSize: "inherit" }}>
+        <ListItemText
+          id={id}
+          primary={context}
+          secondary={option.error}
+          secondaryTypographyProps={{ color: "error", variant: "inherit" }}
+          primaryTypographyProps={{ variant: "inherit" }}
         />
-        {this.selectedContexts.length > 0 && (
-          <small className="hint">
-            <span>Applying contexts:</span>{" "}
-            <code>{this.selectedContexts.join(", ")}</code>
-          </small>
-        )}
-      </div>
+        <ListItemSecondaryAction>
+          <Switch
+            edge="end"
+            disabled={Boolean(option.error)}
+            onChange={(event, checked) => this.kubeContexts.get(context).selected = checked}
+            inputProps={{ "aria-labelledby": id }}
+            color="primary"
+          />
+        </ListItemSecondaryAction>
+      </ListItem>
+    );
+  };
+
+  renderContextSelectionList() {
+    const allContexts = Array.from(this.kubeContexts.values());
+
+    return (
+      <List style={{ fontSize: "inherit" }}>
+        {allContexts.map(this.renderContextSelectionEntry)}
+      </List>
     );
   }
+
+  toggleShowProxySettings = () => {
+    this.showProxySettings = !this.showProxySettings;
+  };
 
   onKubeConfigInputBlur = () => {
     const isChanged = this.kubeConfigPath !== UserStore.getInstance().kubeConfigPath;
@@ -313,11 +317,7 @@ export class AddCluster extends React.Component {
     if (isChanged) {
       this.kubeConfigPath = this.kubeConfigPath.replace("~", os.homedir());
 
-      try {
-        this.setKubeConfig(this.kubeConfigPath, { throwError: true });
-      } catch (err) {
-        this.setKubeConfig(UserStore.getInstance().kubeConfigPath); // revert to previous valid path
-      }
+      this.setKubeConfig(this.kubeConfigPath);
     }
   };
 
@@ -327,63 +327,74 @@ export class AddCluster extends React.Component {
     this.refreshContexts();
   };
 
-  protected formatContextLabel = ({ value: context }: SelectOption<string>) => {
-    const isNew = UserStore.getInstance().newContexts.has(context);
-    const isSelected = this.selectedContexts.includes(context);
-
+  renderProxySettings() {
     return (
-      <div className={cssNames("kube-context flex gaps align-center", context)}>
-        <span>{context}</span>
-        {isNew && <Icon small material="fiber_new"/>}
-        {isSelected && <Icon small material="check" className="box right"/>}
+      <>
+        <h3>
+          Proxy settings
+          <IconButton
+            onClick={this.toggleShowProxySettings}
+            style={{ fontSize: "inherit" }}
+            color="inherit"
+          >
+            {
+              this.showProxySettings
+                ? <KeyboardArrowUp style={{ fontSize: "inherit" }} />
+                : <KeyboardArrowDown style={{ fontSize: "inherit" }} />
+            }
+          </IconButton>
+        </h3>
+        {this.showProxySettings && (
+          <div className="proxy-settings">
+            <p>HTTP Proxy server. Used for communicating with Kubernetes API.</p>
+            <Input
+              autoFocus
+              value={this.proxyServer}
+              onChange={value => this.proxyServer = value}
+              theme="round-black"
+            />
+            <small className="hint">
+              {"A HTTP proxy server URL (format: http://<address>:<port>)."}
+            </small>
+          </div>
+        )}
+      </>
+    );
+  }
+
+  renderError() {
+    if (this.error) {
+      return <div className="error">{this.error}</div>;
+    }
+  }
+
+  renderAddClustersButton() {
+    return (
+      <div className="actions-panel">
+        <Button
+          primary
+          disabled={!this.anySelected}
+          label={this.selectedContexts.length === 1 ? "Add cluster" : "Add clusters"}
+          onClick={this.addClusters}
+          waiting={this.isWaiting}
+          tooltip={this.anySelected || "Select at least one cluster to add."}
+          tooltipOverrideDisabled
+        />
       </div>
     );
-  };
+  }
 
   render() {
-    const submitDisabled = this.selectedContexts.length === 0;
-
     return (
       <DropFileInput onDropFiles={this.onDropKubeConfig}>
         <PageLayout className="AddClusters" showOnTop={true}>
           <h2>Add Clusters from Kubeconfig</h2>
           {this.renderInfo()}
           {this.renderKubeConfigSource()}
-          {this.renderContextSelector()}
-          <div className="cluster-settings">
-            <a href="#" onClick={() => this.showSettings = !this.showSettings}>
-              Proxy settings
-            </a>
-          </div>
-          {this.showSettings && (
-            <div className="proxy-settings">
-              <p>HTTP Proxy server. Used for communicating with Kubernetes API.</p>
-              <Input
-                autoFocus
-                value={this.proxyServer}
-                onChange={value => this.proxyServer = value}
-                theme="round-black"
-              />
-              <small className="hint">
-                {"A HTTP proxy server URL (format: http://<address>:<port>)."}
-              </small>
-            </div>
-          )}
-          {this.error && (
-            <div className="error">{this.error}</div>
-          )}
-
-          <div className="actions-panel">
-            <Button
-              primary
-              disabled={submitDisabled}
-              label={this.selectedContexts.length < 2 ? "Add cluster" : "Add clusters"}
-              onClick={this.addClusters}
-              waiting={this.isWaiting}
-              tooltip={submitDisabled ? "Select at least one cluster to add." : undefined}
-              tooltipOverrideDisabled
-            />
-          </div>
+          {this.renderError()}
+          {this.renderAddClustersButton()}
+          {this.renderContextSelectionList()}
+          {this.renderProxySettings()}
         </PageLayout>
       </DropFileInput>
     );
