@@ -145,6 +145,7 @@ describe("config with existing clusters", () => {
   beforeEach(() => {
     ClusterStore.resetInstance();
     const mockOpts = {
+      "temp-kube-config": kubeconfig,
       "tmp": {
         "lens-cluster-store.json": JSON.stringify({
           __internal__: {
@@ -155,20 +156,20 @@ describe("config with existing clusters", () => {
           clusters: [
             {
               id: "cluster1",
-              kubeConfigPath: kubeconfig,
+              kubeConfigPath: "./temp-kube-config",
               contextName: "foo",
               preferences: { terminalCWD: "/foo" },
               workspace: "default"
             },
             {
               id: "cluster2",
-              kubeConfigPath: kubeconfig,
+              kubeConfigPath: "./temp-kube-config",
               contextName: "foo2",
               preferences: { terminalCWD: "/foo2" }
             },
             {
               id: "cluster3",
-              kubeConfigPath: kubeconfig,
+              kubeConfigPath: "./temp-kube-config",
               contextName: "foo",
               preferences: { terminalCWD: "/foo" },
               workspace: "foo",
@@ -248,6 +249,8 @@ users:
 
     ClusterStore.resetInstance();
     const mockOpts = {
+      "invalid-kube-config": invalidKubeconfig,
+      "valid-kube-config": kubeconfig,
       "tmp": {
         "lens-cluster-store.json": JSON.stringify({
           __internal__: {
@@ -258,14 +261,14 @@ users:
           clusters: [
             {
               id: "cluster1",
-              kubeConfigPath: invalidKubeconfig,
+              kubeConfigPath: "./invalid-kube-config",
               contextName: "test",
               preferences: { terminalCWD: "/foo" },
               workspace: "foo",
             },
             {
               id: "cluster2",
-              kubeConfigPath: kubeconfig,
+              kubeConfigPath: "./valid-kube-config",
               contextName: "foo",
               preferences: { terminalCWD: "/foo" },
               workspace: "default"

@@ -21,7 +21,19 @@ function checkRawContext(rawContext: any): boolean {
   return rawContext.name && rawContext.context?.cluster && rawContext.context?.user;
 }
 
-function loadToOptions(rawYaml: string): any {
+export function loadConfigFromFileSync(filePath: string): KubeConfig {
+  const content = fse.readFileSync(resolvePath(filePath), "utf-8");
+
+  return loadConfigFromString(content);
+}
+
+export async function loadConfigFromFile(filePath: string): Promise<KubeConfig> {
+  const content = await fse.readFile(resolvePath(filePath), "utf-8");
+
+  return loadConfigFromString(content);
+}
+
+export function loadConfigFromString(rawYaml: string): KubeConfig {
   const obj = yaml.safeLoad(rawYaml);
 
   if (typeof obj !== "object" || !obj) {
@@ -32,38 +44,10 @@ function loadToOptions(rawYaml: string): any {
   const clusters = newClusters(rawClusters);
   const users = newUsers(rawUsers);
   const contexts = newContexts(rawContexts?.filter(checkRawContext));
-
-  return { clusters, users, contexts, currentContext };
-}
-
-export function loadConfigFromFileSync(filePath: string): KubeConfig {
-  const content = fse.readFileSync(resolvePath(filePath), "utf-8");
-  const options = loadToOptions(content);
   const kc = new KubeConfig();
 
   // need to load using the kubernetes client to generate a kubeconfig object
-  kc.loadFromOptions(options);
-
-  return kc;
-}
-
-export async function loadConfigFromFile(filePath: string): Promise<KubeConfig> {
-  const content = await fse.readFile(resolvePath(filePath), "utf-8");
-  const options = loadToOptions(content);
-  const kc = new KubeConfig();
-
-  // need to load using the kubernetes client to generate a kubeconfig object
-  kc.loadFromOptions(options);
-
-  return kc;
-}
-
-export function loadConfigFromString(content: string): KubeConfig {
-  const options = loadToOptions(content);
-  const kc = new KubeConfig();
-
-  // need to load using the kubernetes client to generate a kubeconfig object
-  kc.loadFromOptions(options);
+  kc.loadFromOptions({ clusters, users, contexts, currentContext });
 
   return kc;
 }
