@@ -43,14 +43,12 @@ export async function addMinikubeCluster(app: Application) {
   await app.client.moveToObject("button.MuiSpeedDial-fab");
   await app.client.waitForVisible(`button[title="Add from kubeconfig"]`);
   await app.client.click(`button[title="Add from kubeconfig"]`);
-  await app.client.waitUntilTextExists("div", "Select kubeconfig file");
-  await app.client.click("div.Select__control"); // show the context drop-down list
-  await app.client.waitUntilTextExists("div", "minikube");
+  await app.client.waitUntilTextExists(".MuiTypography-root", "minikube");
 
   if (!await app.client.$("button.primary").isEnabled()) {
-    await app.client.click("div.minikube"); // select minikube context
+    await app.client.click("#context-selection-list-item-minikube .MuiListItemSecondaryAction-root");
   } // else the only context, which must be 'minikube', is automatically selected
-  await app.client.click("div.Select__control"); // hide the context drop-down list (it might be obscuring the Add cluster(s) button)
+
   await app.client.click("button.primary"); // add minikube cluster
   await app.client.waitUntilTextExists("div.TableCell", "minikube");
   await app.client.click("div.TableRow");

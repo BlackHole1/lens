@@ -77,7 +77,7 @@ export class AddCluster extends React.Component {
   }
 
   @computed get anySelected(): boolean {
-    return this.selectedContexts.length > 1;
+    return this.selectedContexts.length > 0;
   }
 
   @action
@@ -276,7 +276,7 @@ export class AddCluster extends React.Component {
     const id = `context-selection-${context}`;
 
     return (
-      <ListItem key={context} disabled={Boolean(option.error)} style={{ fontSize: "inherit" }}>
+      <ListItem key={context} id={`context-selection-list-item-${context}`} disabled={Boolean(option.error)} style={{ fontSize: "inherit" }}>
         <ListItemText
           id={id}
           primary={context}
